@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Armadillo Run Reborn - Prototype</title>
+    <style>
+        /* 6. User Interface and Experience - Retro-futuristic Style */
+        body { margin: 0; padding: 0; background: #1a1a1a; color: #ffcc00; font-family: 'Courier New', Courier, monospace; overflow: hidden; }
+        #game-container { position: relative; width: 100vw; height: 100vh; }
+        
+        #ui-layer {
+            position: absolute; top: 10px; left: 10px; pointer-events: none;
+            background: rgba(0, 20, 40, 0.8); border: 2px solid #ffcc00; padding: 15px;
+            border-radius: 4px; width: 300px;
+        }
+        
+        h1 { font-size: 18px; margin: 0 0 10px 0; text-transform: uppercase; color: #00aaff; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .controls { margin-top: 15px; pointer-events: auto; }
+        #hud-toggle {
+            position: absolute; top: 10px; right: 10px; z-index: 200; pointer-events: auto;
+            background: rgba(0, 20, 40, 0.9); color: #00aaff; border: 1px solid #00aaff;
+            padding: 6px 10px; border-radius: 4px; font-family: inherit; cursor: pointer;
+        }
+        #ui-layer.ghost { opacity: 0.3; }
+        #ui-layer.ghost .controls { pointer-events: none; }
+        
+        button {
+            background: #003366; color: #00aaff; border: 1px solid #00aaff;
+            padding: 5px 10px; cursor: pointer; font-family: inherit; margin-right: 5px; margin-bottom: 5px;
+            transition: all 0.2s;
+        }
+        button:hover { background: #00aaff; color: #000; }
+        button.active { background: #ffcc00; color: #000; border-color: #fff; }
+        
+        #win-overlay {
+            display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9); border: 4px solid #00ff00; padding: 40px;
+            text-align: center; z-index: 100;
+        }
+        
+        .instruction { font-size: 12px; color: #aaa; margin-top: 10px; }
+        @media (max-width: 600px) {
+            #ui-layer { width: 240px; padding: 10px; }
+            button { width: calc(50% - 8px); margin-right: 4px; font-size: 12px; }
+            .stat-row { font-size: 12px; }
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+</head>
+<body>
+
+<div id="game-container">
+    <button id="hud-toggle" onclick="toggleHudGhost()">HUD: normal</button>
+    <div id="ui-layer">
+        <h1>Armadillo Run Reborn</h1>
+        <div class="stat-row"><span>Budget:</span> <span id="budget-display">$1000</span></div>
+        <div class="stat-row"><span>Cost:</span> <span id="cost-display">$0</span></div>
+        <div class="stat-row"><span>Status:</span> <span id="status-display">EDIT MODE</span></div>
+        <div class="stat-row"><span>Portal Timer:</span> <span id="timer-display">0.0s</span></div>
+        
+        <div class="controls">
+            <button id="btn-rope" class="mat-btn active" onclick="selectMaterial('rope')">Rope ($20)</button>
+            <button id="btn-bar" class="mat-btn" onclick="selectMaterial('bar')">Metal ($40)</button>
+            <button id="btn-elastic" class="mat-btn" onclick="selectMaterial('elastic')">Elastic ($25)</button>
+            <hr style="border-color: #444;">
+            <button id="mode-build" class="mode-btn active" onclick="setMode('build')">Build Mode</button>
+            <button id="mode-delete" class="mode-btn" onclick="setMode('delete')">Delete Mode</button>
+            <hr style="border-color: #444;">
+            <button onclick="toggleSimulation()" id="sim-btn">RUN (Space)</button>
+            <button onclick="resetLevel()">RESET</button>
+            <div class="instruction">Left/Single Tap: Build<br>Right Click/Delete Mode: Delete<br>Space: Run/Stop</div>
+        </div>
+    </div>
+
+    <div id="win-overlay">
+        <h1 style="color: #00ff00; font-size: 32px;">LEVEL COMPLETE</h1>
+        <p>Budget Surplus: <span id="final-score"></span></p>
+        <button onclick="resetLevel(); document.getElementById('win-overlay').style.display='none'">Replay</button>
+    </div>
+</div>
+
+<script>
+    // --- 7. Technical Requirements (Matter.js Setup) ---
+    const Engine = Matter.Engine,
+          Render = Matter.Render,
+          Runner = Matter.Runner,
+          Bodies = Matter.Bodies,
+          Composite = Matter.Composite,
+          Constraint = Matter.Constraint,
+          Vector = Matter.Vector,
+          Events = Matter.Events,
+          Mouse = Matter.Mouse,
+          MouseConstraint = Matter.MouseConstraint;
+
+    // Init Engine
+    const engine = Engine.create();
+    const world = engine.world;
+    engine.gravity.y = 1; // Standard gravity
+
+    // Renderer
+    const render = Render.create({
+        element: document.getElementById('game-container'),
+        engine: engine,
+        options: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+            wireframes: false,
+            background: '#0d0d0d'
+        }
+    });
+
+    // --- Game State & PRD Logic ---
+    let isSimulating = false;
+    let currentMaterial = 'rope';
+    let currentMode = 'build'; // build | delete
+    let hudGhost = false;
+    let budget = 1000;
+    let currentCost = 0;
+    const nodes = []; // Stores anchors and created nodes
+    const links = []; // Stores the constraints (materials)
+    let ground, startPlatform;
+    
+    // 5.1 Gameplay Overview - Win Condition Logic
+    let timeInPortal = 0;
+    let portalBody;
+    let armadilloBody;
+    const WIN_TIME = 5000; // 5 seconds (ms)
+
+    // --- Level Setup (Reflecting PRD 5.4) ---
+    function initLevel() {
+        Composite.clear(world);
+        Engine.clear(engine);
+        nodes.length = 0;
+        links.length = 0;
+        currentCost = 0;
+        timeInPortal = 0;
+        updateUI();
+
+        // 1. Static Level Geometry (Floors/Walls)
+        ground = Bodies.rectangle(window.innerWidth/2, window.innerHeight - 20, window.innerWidth, 40, { 
+            isStatic: true, 
+            render: { fillStyle: '#444' } 
+        });
+        
+        startPlatform = Bodies.rectangle(200, 300, 200, 20, { 
+            isStatic: true, 
+            render: { fillStyle: '#555' } 
+        });
+
+        // 2. The Armadillo (Yellow Sphere)
+        armadilloBody = Bodies.circle(200, 250, 20, { 
+            restitution: 0.7, // Bouncy
+            friction: 0.05,
+            density: 0.04,
+            render: { fillStyle: '#ffcc00', strokeStyle: '#fff', lineWidth: 2 }
+        });
+        // Keep armadillo sleeping until sim starts (PRD 5.1)
+        Matter.Body.setStatic(armadilloBody, true); 
+
+        // 3. The Portal (Blue Sensor)
+        const portalX = window.innerWidth - 200;
+        const portalY = window.innerHeight - 150;
+        portalBody = Bodies.circle(portalX, portalY, 40, {
+            isStatic: true,
+            isSensor: true, // Doesn't physically collide
+            render: { fillStyle: 'rgba(0, 170, 255, 0.3)', strokeStyle: '#00aaff', lineWidth: 3 }
+        });
+
+        // 4. Anchors (Building Points)
+        createAnchor(300, 300, true); // End of start platform (locked)
+        createAnchor(portalX - 100, 200, true); // High anchor (locked)
+        createAnchor(portalX + 100, 200, true); // High anchor (locked)
+        createAnchor(portalX, window.innerHeight - 60, true); // Low anchor near ground (locked)
+
+        Composite.add(world, [ground, startPlatform, armadilloBody, portalBody]);
+    }
+
+    function createAnchor(x, y, isLocked = false) {
+        const anchor = Bodies.circle(x, y, 6, {
+            isStatic: true,
+            render: { fillStyle: '#fff' },
+            collisionFilter: { group: -1 } // Don't collide with armadillo
+        });
+        anchor.isNode = true; // Custom flag
+        anchor.isLocked = isLocked;
+        Composite.add(world, anchor);
+        nodes.push(anchor);
+    }
+
+    // --- 5.3 Tools and Building Mechanics ---
+    
+    // Material Definitions (PRD 5.2)
+    const MATERIALS = {
+        rope: { color: '#8B4513', stiffness: 0.8, costFactor: 0.2, type: 'flexible' }, // Flexible, cheap
+        bar: { color: '#A9A9A9', stiffness: 1.0, costFactor: 0.4, type: 'rigid' },   // Rigid, expensive
+        elastic: { color: '#FF4444', stiffness: 0.05, costFactor: 0.25, type: 'spring' } // Very springy
+    };
+
+    let dragStartNode = null;
+    let dragLine = null;
+
+    // Mouse Interaction for Building
+    const mouse = Mouse.create(render.canvas);
+    const mouseConstraint = MouseConstraint.create(engine, {
+        mouse: mouse,
+        constraint: { render: { visible: false } } // Hide default dragger
+    });
+    render.mouse = mouse;
+
+    Events.on(mouseConstraint, 'mousedown', function(event) {
+        if (isSimulating) return; // No building during sim
+
+        const target = getNodeAt(mouse.position);
+
+        if (currentMode === 'delete') {
+            if (target) removeNode(target);
+            dragStartNode = null;
+            return;
+        }
+
+        // Only allow building from existing anchors (no new anchor creation)
+        dragStartNode = target || null;
+    });
+
+    Events.on(mouseConstraint, 'mousemove', function(event) {
+        // Visualize drag line would go here
+    });
+
+    Events.on(mouseConstraint, 'mouseup', function(event) {
+        if (isSimulating || !dragStartNode) {
+            dragStartNode = null;
+            return;
+        }
+
+        if (currentMode === 'delete') {
+            dragStartNode = null;
+            return;
+        }
+
+        const endNode = getNodeAt(mouse.position);
+        if (endNode && endNode !== dragStartNode) createLink(dragStartNode, endNode);
+        dragStartNode = null;
+    });
+
+    // Right-click delete support (desktop)
+    render.canvas.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const rect = render.canvas.getBoundingClientRect();
+        const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        const target = getNodeAt(pos);
+        if (target) removeNode(target);
+    });
+
+    function createLink(nodeA, nodeB) {
+        // Calculate Cost
+        const dist = Vector.magnitude(Vector.sub(nodeA.position, nodeB.position));
+        const matProps = MATERIALS[currentMaterial];
+        const linkCost = Math.floor(dist * matProps.costFactor);
+
+        if (currentCost + linkCost > budget) {
+            alert("Over Budget!");
+            return;
+        }
+
+        // Create Constraint
+        const constraint = Constraint.create({
+            bodyA: nodeA,
+            bodyB: nodeB,
+            stiffness: matProps.stiffness,
+            length: dist, // Maintain current distance
+            damping: 0.05,
+            render: {
+                lineWidth: currentMaterial === 'bar' ? 4 : 2,
+                strokeStyle: matProps.color,
+                type: 'line'
+            }
+        });
+
+        constraint.cost = linkCost; // Store cost on object
+        
+        Composite.add(world, constraint);
+        links.push(constraint);
+        currentCost += linkCost;
+        updateUI();
+    }
+
+    function getNodeAt(position) {
+        const radius = 12;
+        return nodes.find(n => Vector.magnitude(Vector.sub(n.position, position)) <= radius);
+    }
+
+    function removeNode(node) {
+        if (node.isLocked) return;
+        // Remove attached links and refund their costs
+        for (let i = links.length - 1; i >= 0; i--) {
+            const link = links[i];
+            if (link.bodyA === node || link.bodyB === node) {
+                Composite.remove(world, link);
+                currentCost = Math.max(0, currentCost - (link.cost || 0));
+                links.splice(i, 1);
+            }
+        }
+        Composite.remove(world, node);
+        const idx = nodes.indexOf(node);
+        if (idx !== -1) nodes.splice(idx, 1);
+        updateUI();
+    }
+
+    // --- Simulation Loop & Game Logic ---
+
+    function toggleSimulation() {
+        if (isSimulating) {
+            resetLevel(); // If running, stop resets to edit mode
+        } else {
+            startSimulation();
+        }
+    }
+
+    function startSimulation() {
+        isSimulating = true;
+        document.getElementById('status-display').innerText = "SIMULATING";
+        document.getElementById('status-display').style.color = "#00ff00";
+        document.getElementById('sim-btn').innerText = "STOP (Space)";
+        
+        // Wake up Armadillo
+        Matter.Body.setStatic(armadilloBody, false);
+        
+        // In a full clone, we would lock "Bar" constraints to be rigid structures here
+    }
+
+    function resetLevel() {
+        isSimulating = false;
+        timeInPortal = 0;
+        document.getElementById('status-display').innerText = "EDIT MODE";
+        document.getElementById('status-display').style.color = "#ffcc00";
+        document.getElementById('sim-btn').innerText = "RUN (Space)";
+        document.getElementById('win-overlay').style.display = "none";
+        document.getElementById('timer-display').innerText = "0.0s";
+        setMode('build');
+
+        // Reset Armadillo Position
+        Matter.Body.setPosition(armadilloBody, { x: 200, y: 250 });
+        Matter.Body.setVelocity(armadilloBody, { x: 0, y: 0 });
+        Matter.Body.setAngularVelocity(armadilloBody, 0);
+        Matter.Body.setStatic(armadilloBody, true);
+        
+        updateUI();
+    }
+
+    // Game Loop Update
+    Events.on(engine, 'beforeUpdate', function(event) {
+        if (!isSimulating) return;
+
+        // Win Condition Check (PRD 5.1)
+        const distance = Vector.magnitude(Vector.sub(armadilloBody.position, portalBody.position));
+        
+        // 40 is portal radius
+        const delta = engine.timing.delta || event.delta || 16.67;
+        if (distance < 40) {
+            timeInPortal += delta;
+        } else {
+            timeInPortal = Math.max(0, timeInPortal - delta);
+        }
+
+        // Update Timer UI
+        const seconds = (timeInPortal / 1000).toFixed(1);
+        document.getElementById('timer-display').innerText = seconds + "s";
+
+        if (timeInPortal >= WIN_TIME) {
+            triggerWin();
+        }
+    });
+
+    function triggerWin() {
+        isSimulating = false;
+        const surplus = budget - currentCost;
+        document.getElementById('final-score').innerText = "$" + surplus;
+        document.getElementById('win-overlay').style.display = "block";
+    }
+
+    // --- UI Helpers ---
+    function selectMaterial(mat) {
+        currentMaterial = mat;
+        document.querySelectorAll('.mat-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('btn-' + mat).classList.add('active');
+    }
+
+    function updateUI() {
+        document.getElementById('budget-display').innerText = "$" + budget;
+        document.getElementById('cost-display').innerText = "$" + currentCost;
+        
+        const remaining = budget - currentCost;
+        document.getElementById('budget-display').style.color = remaining < 0 ? 'red' : '#ffcc00';
+    }
+
+    function setMode(mode) {
+        currentMode = mode;
+        document.getElementById('mode-build').classList.toggle('active', mode === 'build');
+        document.getElementById('mode-delete').classList.toggle('active', mode === 'delete');
+    }
+
+    function toggleHudGhost() {
+        hudGhost = !hudGhost;
+        const hud = document.getElementById('ui-layer');
+        hud.classList.toggle('ghost', hudGhost);
+        const toggle = document.getElementById('hud-toggle');
+        toggle.innerText = hudGhost ? 'HUD: passthrough' : 'HUD: normal';
+        // When ghosted, controls stop intercepting input, so building is possible underneath.
+    }
+
+    // Keyboard Shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') toggleSimulation();
+        if (e.key === '1') selectMaterial('rope');
+        if (e.key === '2') selectMaterial('bar');
+        if (e.key === '3') selectMaterial('elastic');
+        if (e.key === 'd') setMode('delete');
+        if (e.key === 'b') setMode('build');
+    });
+
+    window.addEventListener('resize', () => {
+        render.canvas.width = render.options.width = window.innerWidth;
+        render.canvas.height = render.options.height = window.innerHeight;
+        Render.lookAt(render, {
+            min: { x: 0, y: 0 },
+            max: { x: window.innerWidth, y: window.innerHeight }
+        });
+    });
+
+    // Start
+    setMode('build');
+    initLevel();
+    Render.run(render);
+    const runner = Runner.create();
+    Runner.run(runner, engine);
+
+</script>
+</body>
+</html>
